@@ -37,6 +37,15 @@ with lib;
       '';
     };
 
+    namespace = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = ''
+        Network namespace to create the WireGuard interface in.
+        If null, the interface will be created in the default namespace.
+      '';
+    };
+
     region = mkOption {
       type = types.str;
       default = "";
@@ -152,7 +161,7 @@ with lib;
 
     systemd.services.pia-vpn = {
       description = "Connect to Private Internet Access on ${cfg.interface}";
-      path = with pkgs; [ bash curl gawk jq wireguard-tools ];
+      path = with pkgs; [ bash curl gawk jq wireguard-tools iproute2 ];
       requires = [ "network-online.target" ];
       after = [ "network.target" "network-online.target" ];
       wantedBy = [ "multi-user.target" ];
@@ -175,6 +184,7 @@ with lib;
       };
 
       script = ''
+        set -x
         printServerLatency() {
           serverIP="$1"
           regionID="$2"
@@ -274,9 +284,50 @@ with lib;
         ${cfg.preUp}
 
         networkctl reload
-        networkctl up ${cfg.interface}
 
-        ${pkgs.systemd}/lib/systemd/systemd-networkd-wait-online -i ${cfg.interface}
+        ${optionalString (cfg.namespace != null) ''
+          # Wait for interface to be created by systemd-networkd
+          for i in {1..30}; do
+            if ip link show ${cfg.interface} &>/dev/null; then
+              echo "Interface ${cfg.interface} detected"
+              break
+            fi
+            echo "Waiting for ${cfg.interface} to be created..."
+            sleep 1
+          done
+
+          if ! ip link show ${cfg.interface} &>/dev/null; then
+            echo "Interface ${cfg.interface} was not created after waiting"
+            exit 1
+          fi
+
+          # Ensure namespace exists
+          if ! ip netns list | grep -q "^${cfg.namespace}$"; then
+            echo "Creating network namespace ${cfg.namespace}"
+            ip netns add ${cfg.namespace}
+          fi
+
+          # Move interface to namespace
+          echo "Moving ${cfg.interface} to namespace ${cfg.namespace}"
+          ip link set ${cfg.interface} netns ${cfg.namespace}
+
+          # Configure interface in namespace
+          echo "Configuring ${cfg.interface} in namespace ${cfg.namespace}"
+          ip -n ${cfg.namespace} address add ''${peerip}/32 dev ${cfg.interface}
+          ip -n ${cfg.namespace} link set ${cfg.interface} up
+          ip -n ${cfg.namespace} link set lo up
+
+          # Add default route through VPN
+          ip -n ${cfg.namespace} route add default dev ${cfg.interface}
+
+          echo "${cfg.interface} is up in namespace ${cfg.namespace}"
+        ''}
+
+        ${optionalString (cfg.namespace == null) ''
+          # Bring up interface in default namespace (if not using namespace)
+          networkctl up ${cfg.interface}
+          ${pkgs.systemd}/lib/systemd/systemd-networkd-wait-online -i ${cfg.interface}
+        ''}
 
         ${cfg.postUp}
       '';
@@ -288,11 +339,23 @@ with lib;
 
         ${cfg.preDown}
 
+        ${optionalString (cfg.namespace != null) ''
+          # If interface is in namespace, delete it from there
+          if ip netns exec ${cfg.namespace} ip link show ${cfg.interface} &>/dev/null; then
+            echo "Deleting ${cfg.interface} from namespace ${cfg.namespace}"
+            ip netns exec ${cfg.namespace} ip link delete ${cfg.interface} || true
+          fi
+        ''}
+
         rm /run/systemd/network/60-${cfg.interface}.{netdev,network} || true
 
-        echo Bringing down network interface ${cfg.interface}.
-        networkctl down ${cfg.interface}
-        networkctl delete ${cfg.interface}
+        ${optionalString (cfg.namespace == null) ''
+          # Only use networkctl if not using namespace
+          echo Bringing down network interface ${cfg.interface}.
+          networkctl down ${cfg.interface}
+          networkctl delete ${cfg.interface}
+        ''}
+
         networkctl reload
 
         ${cfg.postDown}
@@ -301,7 +364,7 @@ with lib;
 
     systemd.services.pia-vpn-portforward = mkIf cfg.portForward.enable {
       description = "Configure port-forwarding for PIA connection ${cfg.interface}";
-      path = with pkgs; [ curl jq ];
+      path = with pkgs; [ curl jq iproute2 ];
       after = [ "pia-vpn.service" ];
       bindsTo = [ "pia-vpn.service" ];
       wantedBy = [ "pia-vpn.service" ];
@@ -322,6 +385,8 @@ with lib;
         RestartSteps = "10";
         RestartMaxDelaySec = "15min";
         EnvironmentFile = cfg.environmentFile;
+      } // optionalAttrs (cfg.namespace != null) {
+        NetworkNamespacePath = "/var/run/netns/${cfg.namespace}";
       };
 
       script = ''
