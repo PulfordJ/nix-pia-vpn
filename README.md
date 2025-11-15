@@ -69,13 +69,6 @@ Based on [tadfisher's pia-vpn.nix](https://github.com/tadfisher/flake/blob/f6f9c
   '';
 ```
 
-### [optional] Configure Transmission with forwarded port
-
-```
-# transmission-rpc.env
-# put this in sops-nix or agenix!
-TR_AUTH=username:password
-```
 
 ```
 # configuration.nix

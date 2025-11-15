@@ -302,7 +302,7 @@ with lib;
           fi
 
           # Ensure namespace exists
-          if ! ip netns list | grep -q "^${cfg.namespace}$"; then
+          if ! ip netns list | grep -q "${cfg.namespace}"; then
             echo "Creating network namespace ${cfg.namespace}"
             ip netns add ${cfg.namespace}
           fi
