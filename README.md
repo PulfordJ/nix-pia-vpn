@@ -97,3 +97,33 @@ TR_AUTH=username:password
     bindsTo = [ "pia-vpn.service" ];
   };
 ```
+
+### [optional] Network Namespace Isolation
+
+The `namespace` option creates the WireGuard interface in an isolated network namespace instead of the main system namespace. This prevents the PIA service from disrupting other network services (like Tailscale) during startup, since the VPN interface is created in complete isolation from the host's networking.
+
+Additionally, services bound to this namespace can **only** access the internet through the VPN, providing leak-proof isolation.
+
+```
+# configuration.nix
+  services.pia-vpn = {
+    enable = true;
+    certificateFile = ./ca.rsa.4096.crt;
+    environmentFile = ./pia.env;
+    namespace = "wg";  # Create in isolated namespace
+  };
+
+  # Bind a service to the VPN namespace
+  systemd.services.deluged = {
+    after = [ "pia-vpn.service" ];
+    bindsTo = [ "pia-vpn.service" ];
+    serviceConfig.NetworkNamespacePath = "/var/run/netns/wg";
+  };
+```
+
+**Test VPN IP from inside namespace:**
+```bash
+sudo ip netns exec wg curl -s https://ifconfig.me
+```
+
+**Backward compatibility:** Setting `namespace = null` (the default) uses the original behavior.
